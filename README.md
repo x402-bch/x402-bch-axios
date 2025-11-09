@@ -36,7 +36,8 @@ const api = withPaymentInterceptor(
   }
 )
 
-const response = await api.get('/premium-endpoint')
+// Get data from an endpoint that requires 402 payment for access.
+const response = await api.get('/weather')
 console.log(response.data)
 ```
 
