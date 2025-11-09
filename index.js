@@ -15,6 +15,20 @@
 import BCHWallet from 'minimal-slp-wallet'
 import RetryQueue from '@chris.troutner/retry-queue'
 
+const dependencies = {
+  BCHWallet,
+  RetryQueue
+}
+
+export function __setDependencies (overrides = {}) {
+  Object.assign(dependencies, overrides)
+}
+
+export function __resetDependencies () {
+  dependencies.BCHWallet = BCHWallet
+  dependencies.RetryQueue = RetryQueue
+}
+
 const currentUtxo = {
   txid: null,
   vout: null,
@@ -29,7 +43,7 @@ const currentUtxo = {
  * @returns {{ ecpair: any, address: string, wif: string, paymentAmountSats: number, signMessage: (message: string) => string }}
  */
 export function createSigner (privateKeyWIF, paymentAmountSats) {
-  const wallet = new BCHWallet()
+  const wallet = new dependencies.BCHWallet()
   const bchjs = wallet.bchjs
 
   const ecpair = bchjs.ECPair.fromWIF(privateKeyWIF)
@@ -83,9 +97,6 @@ export async function createPaymentHeader (
   txid = null,
   vout = null
 ) {
-  const wallet = new BCHWallet()
-  await wallet.walletInfoPromise
-
   const authorization = {
     from: signer.address,
     to: paymentRequirements.payTo,
@@ -115,13 +126,13 @@ async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
   const { apiType, bchServerURL } = bchServerConfig
   const paymentAmountSats = signer.paymentAmountSats || paymentRequirements.minAmountRequired
 
-  const bchWallet = new BCHWallet(signer.wif, {
+  const bchWallet = new dependencies.BCHWallet(signer.wif, {
     interface: apiType,
     restURL: bchServerURL
   })
   await bchWallet.initialize()
 
-  const retryQueue = new RetryQueue()
+  const retryQueue = new dependencies.RetryQueue()
   const receivers = [
     {
       address: paymentRequirements.payTo,
@@ -195,7 +206,11 @@ export function withPaymentInterceptor (
         let satsLeft = null
 
         if (!currentUtxo.txid || currentUtxo.satsLeft < cost) {
-          const payment = await sendPayment(signer, paymentRequirements, bchServerConfig)
+          const payment = await internals.sendPayment(
+            signer,
+            paymentRequirements,
+            bchServerConfig
+          )
           txid = payment.txid
           vout = payment.vout
           satsLeft = payment.satsSent - cost
@@ -231,3 +246,23 @@ export function withPaymentInterceptor (
 
   return axiosInstance
 }
+
+const internals = {
+  dependencies,
+  currentUtxo,
+  sendPayment
+}
+
+export function __resetCurrentUtxo () {
+  currentUtxo.txid = null
+  currentUtxo.vout = null
+  currentUtxo.satsLeft = 0
+}
+
+export function __resetInternals () {
+  internals.sendPayment = sendPayment
+  __resetDependencies()
+  __resetCurrentUtxo()
+}
+
+export const __internals = internals
