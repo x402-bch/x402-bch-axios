@@ -83,8 +83,6 @@ export async function createPaymentHeader (
   txid = null,
   vout = null
 ) {
-  const wallet = new BCHWallet()
-  await wallet.walletInfoPromise
 
   const authorization = {
     from: signer.address,
