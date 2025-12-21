@@ -26,7 +26,7 @@
   "repository": "x402-bch/x402-bch-axios",
   "dependencies": {
     "@chris.troutner/retry-queue": "1.0.11",
-    "minimal-slp-wallet": "6.1.0"
+    "minimal-slp-wallet": "7.0.2"
   },
   "devDependencies": {
     "c8": "10.1.3",

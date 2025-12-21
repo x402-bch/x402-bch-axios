@@ -130,6 +130,8 @@ async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
     interface: apiType,
     restURL: bchServerURL
   })
+  // console.log(`sendPayment() - interface: ${apiType}, restURL: ${bchServerURL}, wif: ${signer.wif}, payTo: ${paymentRequirements.payTo}, paymentAmountSats: ${paymentAmountSats}`)
+  console.log(`Sending ${paymentAmountSats} for x402 API payment to ${paymentRequirements.payTo}`)
   await bchWallet.initialize()
 
   const retryQueue = new dependencies.RetryQueue()
