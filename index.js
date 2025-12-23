@@ -63,14 +63,33 @@ export function createSigner (privateKeyWIF, paymentAmountSats) {
 export const createBCHSigner = createSigner
 
 /**
+ * Normalizes network identifier to support both v1 and v2 formats.
+ * v1 uses 'bch', v2 uses CAIP-2 format 'bip122:000000000000000000651ef99cb9fcbe'
+ *
+ * @param {string} network - Network identifier
+ * @returns {boolean} True if the network is BCH (mainnet)
+ */
+function isBCHNetwork (network) {
+  if (!network) return false
+  // v1 format
+  if (network === 'bch') return true
+  // v2 CAIP-2 format for BCH mainnet
+  if (network === 'bip122:000000000000000000651ef99cb9fcbe') return true
+  // v2 CAIP-2 format pattern matching (bip122:*)
+  if (network.startsWith('bip122:')) return true
+  return false
+}
+
+/**
  * Selects BCH `utxo` payment requirements from a 402 accepts array.
+ * Supports both v1 ('bch') and v2 (CAIP-2 'bip122:*') network formats.
  *
  * @param {Array} accepts - Array of payment requirements objects
  * @returns {Object} First BCH `utxo` payment requirement
  */
 export function selectPaymentRequirements (accepts = []) {
   const bchRequirements = accepts.filter(req => {
-    return req?.network === 'bch' && req?.scheme === 'utxo'
+    return isBCHNetwork(req?.network) && req?.scheme === 'utxo'
   })
 
   if (bchRequirements.length === 0) {
@@ -81,26 +100,33 @@ export function selectPaymentRequirements (accepts = []) {
 }
 
 /**
- * Builds the X-PAYMENT header payload for BCH transfers.
+ * Builds the PAYMENT-SIGNATURE header payload for BCH transfers.
  *
  * @param {ReturnType<typeof createSigner>} signer
  * @param {Object} paymentRequirements
  * @param {number} x402Version
  * @param {string|null} txid
  * @param {number|null} vout
+ * @param {Object|null} resource - Optional ResourceInfo object
+ * @param {Object|null} extensions - Optional extensions object
  * @returns {Promise<string>}
  */
 export async function createPaymentHeader (
   signer,
   paymentRequirements,
-  x402Version = 1,
+  x402Version = 2,
   txid = null,
-  vout = null
+  vout = null,
+  resource = null,
+  extensions = null
 ) {
+  // Support both v1 (minAmountRequired) and v2 (amount) field names
+  const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
+
   const authorization = {
     from: signer.address,
     to: paymentRequirements.payTo,
-    value: paymentRequirements.minAmountRequired,
+    value: amountRequired,
     txid,
     vout,
     amount: signer.paymentAmountSats
@@ -109,14 +135,27 @@ export async function createPaymentHeader (
   const messageToSign = JSON.stringify(authorization)
   const signature = signer.signMessage(messageToSign)
 
+  // Build accepted PaymentRequirements object
+  const accepted = {
+    scheme: paymentRequirements.scheme || 'utxo',
+    network: paymentRequirements.network || 'bip122:000000000000000000651ef99cb9fcbe',
+    amount: amountRequired,
+    asset: paymentRequirements.asset,
+    payTo: paymentRequirements.payTo,
+    maxTimeoutSeconds: paymentRequirements.maxTimeoutSeconds,
+    extra: paymentRequirements.extra || {}
+  }
+
+  // Build v2 PaymentPayload structure
   const paymentHeader = {
     x402Version,
-    scheme: paymentRequirements.scheme || 'utxo',
-    network: paymentRequirements.network || 'bch',
+    ...(resource && { resource }),
+    accepted,
     payload: {
       signature,
       authorization
-    }
+    },
+    ...(extensions && { extensions })
   }
 
   return JSON.stringify(paymentHeader)
@@ -124,7 +163,9 @@ export async function createPaymentHeader (
 
 async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
   const { apiType, bchServerURL } = bchServerConfig
-  const paymentAmountSats = signer.paymentAmountSats || paymentRequirements.minAmountRequired
+  // Support both v1 (minAmountRequired) and v2 (amount) field names
+  const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
+  const paymentAmountSats = signer.paymentAmountSats || amountRequired
 
   const bchWallet = new dependencies.BCHWallet(signer.wif, {
     interface: apiType,
@@ -195,13 +236,46 @@ export function withPaymentInterceptor (
           return Promise.reject(error)
         }
 
-        const { x402Version, accepts } = error.response.data || {}
+        // Parse payment requirements - v2 can come from header, v1 from body
+        let paymentRequired = null
+        let x402Version = 1
+        let accepts = []
+        let resource = null
+        let extensions = null
+
+        // Try v2 PAYMENT-REQUIRED header first (base64-encoded)
+        const paymentRequiredHeader = error.response.headers['payment-required'] ||
+                                      error.response.headers['PAYMENT-REQUIRED']
+        if (paymentRequiredHeader) {
+          try {
+            const decoded = Buffer.from(paymentRequiredHeader, 'base64').toString('utf-8')
+            paymentRequired = JSON.parse(decoded)
+            x402Version = paymentRequired.x402Version || 2
+            accepts = paymentRequired.accepts || []
+            resource = paymentRequired.resource
+            extensions = paymentRequired.extensions
+          } catch (parseError) {
+            // If header parsing fails, fall back to body
+          }
+        }
+
+        // Fall back to body format (v1 or v2)
+        if (!paymentRequired) {
+          const body = error.response.data || {}
+          x402Version = body.x402Version || 1
+          accepts = body.accepts || []
+          resource = body.resource
+          extensions = body.extensions
+        }
+
         if (!accepts || !Array.isArray(accepts) || accepts.length === 0) {
           return Promise.reject(new Error('No payment requirements found in 402 response'))
         }
 
         const paymentRequirements = paymentRequirementsSelector(accepts)
-        const cost = paymentRequirements.minAmountRequired
+        // Support both v1 (minAmountRequired) and v2 (amount) field names
+        // Convert to number for calculations (v2 uses strings, v1 uses numbers)
+        const cost = Number(paymentRequirements.amount || paymentRequirements.minAmountRequired)
 
         let txid = null
         let vout = null
@@ -229,14 +303,16 @@ export function withPaymentInterceptor (
         const paymentHeader = await createPaymentHeader(
           signer,
           paymentRequirements,
-          x402Version || 1,
+          x402Version || 2,
           txid,
-          vout
+          vout,
+          resource,
+          extensions
         )
 
         originalConfig.__is402Retry = true
-        originalConfig.headers['X-PAYMENT'] = paymentHeader
-        originalConfig.headers['Access-Control-Expose-Headers'] = 'X-PAYMENT-RESPONSE'
+        originalConfig.headers['PAYMENT-SIGNATURE'] = paymentHeader
+        originalConfig.headers['Access-Control-Expose-Headers'] = 'PAYMENT-RESPONSE'
 
         const secondResponse = await axiosInstance.request(originalConfig)
         return secondResponse

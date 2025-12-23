@@ -73,7 +73,7 @@ describe('#index.js', () => {
   })
 
   describe('#selectPaymentRequirements', () => {
-    it('should select the first BCH utxo requirement', () => {
+    it('should select the first BCH utxo requirement (v1 format)', () => {
       const accepts = [
         { network: 'eth', scheme: 'account' },
         { network: 'bch', scheme: 'utxo', payTo: 'addr1' },
@@ -82,6 +82,17 @@ describe('#index.js', () => {
 
       const req = selectPaymentRequirements(accepts)
       assert.deepEqual(req, { network: 'bch', scheme: 'utxo', payTo: 'addr1' })
+    })
+
+    it('should select the first BCH utxo requirement (v2 CAIP-2 format)', () => {
+      const accepts = [
+        { network: 'eip155:84532', scheme: 'exact' },
+        { network: 'bip122:000000000000000000651ef99cb9fcbe', scheme: 'utxo', payTo: 'addr1' },
+        { network: 'bch', scheme: 'utxo', payTo: 'addr2' }
+      ]
+
+      const req = selectPaymentRequirements(accepts)
+      assert.deepEqual(req, { network: 'bip122:000000000000000000651ef99cb9fcbe', scheme: 'utxo', payTo: 'addr1' })
     })
 
     it('should throw if no BCH utxo requirement exists', () => {
@@ -93,7 +104,7 @@ describe('#index.js', () => {
   })
 
   describe('#createPaymentHeader', () => {
-    it('should build a valid payment header payload', async () => {
+    it('should build a valid v2 payment header payload', async () => {
       const signer = {
         address: 'bitcoincash:qptest',
         paymentAmountSats: 2000,
@@ -102,7 +113,68 @@ describe('#index.js', () => {
 
       const paymentRequirements = {
         payTo: 'bitcoincash:qprecv',
-        minAmountRequired: 1500,
+        amount: '1500',
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe',
+        asset: '0x0000000000000000000000000000000000000001',
+        maxTimeoutSeconds: 60,
+        extra: {}
+      }
+
+      const resource = {
+        url: 'http://localhost:4021/weather',
+        description: 'Access to weather data',
+        mimeType: 'application/json'
+      }
+
+      const header = await createPaymentHeader(
+        signer,
+        paymentRequirements,
+        2,
+        'tx123',
+        0,
+        resource
+      )
+
+      const parsed = JSON.parse(header)
+      assert.equal(parsed.x402Version, 2)
+      assert.deepEqual(parsed.resource, resource)
+      assert.deepEqual(parsed.accepted, {
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe',
+        amount: '1500',
+        asset: '0x0000000000000000000000000000000000000001',
+        payTo: 'bitcoincash:qprecv',
+        maxTimeoutSeconds: 60,
+        extra: {}
+      })
+      assert.deepEqual(parsed.payload, {
+        signature: 'mock-signature',
+        authorization: {
+          from: 'bitcoincash:qptest',
+          to: 'bitcoincash:qprecv',
+          value: '1500',
+          txid: 'tx123',
+          vout: 0,
+          amount: 2000
+        }
+      })
+      // v2 should not have top-level scheme/network
+      assert.isUndefined(parsed.scheme)
+      assert.isUndefined(parsed.network)
+      assert.isTrue(signer.signMessage.calledOnce)
+    })
+
+    it('should support v1 minAmountRequired field for backward compatibility', async () => {
+      const signer = {
+        address: 'bitcoincash:qptest',
+        paymentAmountSats: 2000,
+        signMessage: sandbox.stub().returns('mock-signature')
+      }
+
+      const paymentRequirements = {
+        payTo: 'bitcoincash:qprecv',
+        minAmountRequired: 1500, // v1 field name
         scheme: 'utxo',
         network: 'bch'
       }
@@ -116,23 +188,8 @@ describe('#index.js', () => {
       )
 
       const parsed = JSON.parse(header)
-      assert.deepEqual(parsed, {
-        x402Version: 2,
-        scheme: 'utxo',
-        network: 'bch',
-        payload: {
-          signature: 'mock-signature',
-          authorization: {
-            from: 'bitcoincash:qptest',
-            to: 'bitcoincash:qprecv',
-            value: 1500,
-            txid: 'tx123',
-            vout: 0,
-            amount: 2000
-          }
-        }
-      })
-      assert.isTrue(signer.signMessage.calledOnce)
+      assert.equal(parsed.accepted.amount, 1500)
+      assert.equal(parsed.payload.authorization.value, 1500)
     })
   })
 
@@ -157,19 +214,31 @@ describe('#index.js', () => {
     }
 
     const basePaymentRequirements = {
-      network: 'bch',
+      network: 'bip122:000000000000000000651ef99cb9fcbe',
       scheme: 'utxo',
       payTo: 'bitcoincash:qprecv',
-      minAmountRequired: 1500
+      amount: '1500',
+      asset: '0x0000000000000000000000000000000000000001',
+      maxTimeoutSeconds: 60,
+      extra: {}
+    }
+
+    const baseResource = {
+      url: 'http://localhost:4021/weather',
+      description: 'Access to weather data',
+      mimeType: 'application/json'
     }
 
     function create402Error (overrides = {}) {
       const defaultError = {
         response: {
           status: 402,
+          headers: {},
           data: {
-            x402Version: 1,
-            accepts: [cloneDeep(basePaymentRequirements)]
+            x402Version: 2,
+            resource: cloneDeep(baseResource),
+            accepts: [cloneDeep(basePaymentRequirements)],
+            extensions: {}
           }
         },
         config: {
@@ -223,14 +292,16 @@ describe('#index.js', () => {
 
       const [, errorHandler] = axiosInstance.interceptors.response.use.firstCall.args
       const error = create402Error({
-        response: { status: 402, data: { accepts: [] } }
+        response: { status: 402, headers: {}, data: { accepts: [] } }
       })
 
       try {
         await errorHandler(error)
         assert.fail('Expected rejection')
       } catch (err) {
-        assert.match(err.message, /No payment requirements/)
+        // Should reject with "No payment requirements found in 402 response"
+        // or "No BCH payment requirements found in 402 response" from selector
+        assert.match(err.message, /No.*payment requirements/)
       }
     })
 
@@ -259,14 +330,16 @@ describe('#index.js', () => {
 
       const updatedConfig = axiosInstance.request.firstCall.args[0]
       assert.isTrue(updatedConfig.__is402Retry)
-      assert.property(updatedConfig.headers, 'X-PAYMENT')
+      assert.property(updatedConfig.headers, 'PAYMENT-SIGNATURE')
       assert.propertyVal(
         updatedConfig.headers,
         'Access-Control-Expose-Headers',
-        'X-PAYMENT-RESPONSE'
+        'PAYMENT-RESPONSE'
       )
 
-      const headerPayload = JSON.parse(updatedConfig.headers['X-PAYMENT'])
+      const headerPayload = JSON.parse(updatedConfig.headers['PAYMENT-SIGNATURE'])
+      assert.equal(headerPayload.x402Version, 2)
+      assert.deepEqual(headerPayload.accepted, basePaymentRequirements)
       assert.equal(headerPayload.payload.authorization.txid, 'tx123')
       assert.equal(__internals.currentUtxo.txid, 'tx123')
       assert.equal(__internals.currentUtxo.satsLeft, 500)
@@ -297,6 +370,98 @@ describe('#index.js', () => {
       assert.isTrue(sendPaymentStub.notCalled)
       assert.equal(__internals.currentUtxo.txid, 'cached')
       assert.equal(__internals.currentUtxo.satsLeft, 500)
+    })
+
+    it('should parse v2 response from PAYMENT-REQUIRED header', async () => {
+      const axiosInstance = createAxiosInstance()
+      const signer = createSignerStub()
+      signer.signMessage.returns('signed')
+
+      const sendPaymentStub = sandbox
+        .stub()
+        .resolves({ txid: 'tx123', vout: 0, satsSent: 2000 })
+      __internals.sendPayment = sendPaymentStub
+
+      axiosInstance.request.resolves({ data: 'ok' })
+
+      withPaymentInterceptor(axiosInstance, signer)
+
+      const [, errorHandler] = axiosInstance.interceptors.response.use.firstCall.args
+
+      // Create v2 response with PAYMENT-REQUIRED header
+      const paymentRequired = {
+        x402Version: 2,
+        resource: baseResource,
+        accepts: [cloneDeep(basePaymentRequirements)],
+        extensions: {}
+      }
+      const headerValue = Buffer.from(JSON.stringify(paymentRequired)).toString('base64')
+
+      const error = {
+        response: {
+          status: 402,
+          headers: {
+            'payment-required': headerValue
+          },
+          data: {}
+        },
+        config: {
+          headers: {}
+        }
+      }
+
+      const response = await errorHandler(error)
+
+      assert.deepEqual(response, { data: 'ok' })
+      assert.isTrue(sendPaymentStub.calledOnce)
+      assert.isTrue(axiosInstance.request.calledOnce)
+
+      const updatedConfig = axiosInstance.request.firstCall.args[0]
+      const headerPayload = JSON.parse(updatedConfig.headers['PAYMENT-SIGNATURE'])
+      assert.equal(headerPayload.x402Version, 2)
+      assert.deepEqual(headerPayload.resource, baseResource)
+    })
+
+    it('should support v1 response format for backward compatibility', async () => {
+      const axiosInstance = createAxiosInstance()
+      const signer = createSignerStub()
+      signer.signMessage.returns('signed')
+
+      const sendPaymentStub = sandbox
+        .stub()
+        .resolves({ txid: 'tx123', vout: 0, satsSent: 2000 })
+      __internals.sendPayment = sendPaymentStub
+
+      axiosInstance.request.resolves({ data: 'ok' })
+
+      withPaymentInterceptor(axiosInstance, signer)
+
+      const [, errorHandler] = axiosInstance.interceptors.response.use.firstCall.args
+
+      // Create v1 response format
+      const error = {
+        response: {
+          status: 402,
+          headers: {},
+          data: {
+            x402Version: 1,
+            accepts: [{
+              network: 'bch',
+              scheme: 'utxo',
+              payTo: 'bitcoincash:qprecv',
+              minAmountRequired: 1500
+            }]
+          }
+        },
+        config: {
+          headers: {}
+        }
+      }
+
+      const response = await errorHandler(error)
+
+      assert.deepEqual(response, { data: 'ok' })
+      assert.isTrue(sendPaymentStub.calledOnce)
     })
   })
 })
