@@ -1,6 +1,6 @@
 {
   "name": "x402-bch-axios",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Axios wrapper for x402 payment protocol with Bitcoin Cash (BCH) support.",
   "main": "index.js",
   "type": "module",
