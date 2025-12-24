@@ -165,33 +165,57 @@ export async function createPaymentHeader (
 }
 
 async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
-  const { apiType, bchServerURL } = bchServerConfig
-  // Support both v1 (minAmountRequired) and v2 (amount) field names
-  const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
-  const paymentAmountSats = signer.paymentAmountSats || amountRequired
+  try {
+    const { apiType, bchServerURL } = bchServerConfig
+    // Support both v1 (minAmountRequired) and v2 (amount) field names
+    const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
+    const paymentAmountSats = signer.paymentAmountSats || amountRequired
 
-  const bchWallet = new dependencies.BCHWallet(signer.wif, {
-    interface: apiType,
-    restURL: bchServerURL
-  })
-  // console.log(`sendPayment() - interface: ${apiType}, restURL: ${bchServerURL}, wif: ${signer.wif}, payTo: ${paymentRequirements.payTo}, paymentAmountSats: ${paymentAmountSats}`)
-  console.log(`Sending ${paymentAmountSats} for x402 API payment to ${paymentRequirements.payTo}`)
-  await bchWallet.initialize()
+    const bchWallet = new dependencies.BCHWallet(signer.wif, {
+      interface: apiType,
+      restURL: bchServerURL
+    })
+    // console.log(`sendPayment() - interface: ${apiType}, restURL: ${bchServerURL}, wif: ${signer.wif}, payTo: ${paymentRequirements.payTo}, paymentAmountSats: ${paymentAmountSats}`)
+    console.log(`Sending ${paymentAmountSats} for x402 API payment to ${paymentRequirements.payTo}`)
+    await bchWallet.initialize()
 
-  const retryQueue = new dependencies.RetryQueue()
-  const receivers = [
-    {
-      address: paymentRequirements.payTo,
-      amountSat: paymentAmountSats
+    const retryQueue = new dependencies.RetryQueue()
+    const receivers = [
+      {
+        address: paymentRequirements.payTo,
+        amountSat: paymentAmountSats
+      }
+    ]
+
+    // Wrap send function to detect "Insufficient balance" errors
+    const sendWithRetry = async (receivers) => {
+      try {
+        return await bchWallet.send(receivers)
+      } catch (error) {
+        // Check if error message contains "Insufficient balance"
+        if (error.message && error.message.includes('Insufficient balance')) {
+          return null
+        }
+
+        // Re-throw other errors normally (will be retried)
+        throw error
+      }
     }
-  ]
 
-  const txid = await retryQueue.addToQueue(bchWallet.send.bind(bchWallet), receivers)
+    const txid = await retryQueue.addToQueue(sendWithRetry, receivers)
 
-  return {
-    txid,
-    vout: 0,
-    satsSent: paymentAmountSats
+    if (txid === null) {
+      throw new Error('Insufficient balance')
+    }
+
+    return {
+      txid,
+      vout: 0,
+      satsSent: paymentAmountSats
+    }
+  } catch (err) {
+    console.error('Error in x402-bch-axios/sendPayment(): ', err.message)
+    throw err
   }
 }
 
