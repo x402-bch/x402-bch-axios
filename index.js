@@ -123,13 +123,16 @@ export async function createPaymentHeader (
   // Support both v1 (minAmountRequired) and v2 (amount) field names
   const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
 
+  // Check if this is "check my tab" mode (txid === "*")
+  const isCheckMyTabMode = txid === '*'
+
   const authorization = {
     from: signer.address,
     to: paymentRequirements.payTo,
     value: amountRequired,
-    txid,
-    vout,
-    amount: signer.paymentAmountSats
+    txid: isCheckMyTabMode ? '*' : txid,
+    vout: isCheckMyTabMode ? null : vout,
+    amount: isCheckMyTabMode ? null : signer.paymentAmountSats
   }
 
   const messageToSign = JSON.stringify(authorization)
@@ -232,8 +235,15 @@ export function withPaymentInterceptor (
           return Promise.reject(new Error('Missing axios request configuration'))
         }
 
+        // Prevent infinite loops
         if (originalConfig.__is402Retry) {
           return Promise.reject(error)
+        }
+
+        // If this is a "check my tab" retry that failed, fall back to UTXO generation
+        if (originalConfig.__is402CheckMyTab) {
+          // Clear the flag and proceed with UTXO generation
+          originalConfig.__is402CheckMyTab = false
         }
 
         // Parse payment requirements - v2 can come from header, v1 from body
@@ -277,6 +287,45 @@ export function withPaymentInterceptor (
         // Convert to number for calculations (v2 uses strings, v1 uses numbers)
         const cost = Number(paymentRequirements.amount || paymentRequirements.minAmountRequired)
 
+        // Try "check my tab" mode first if no UTXO is tracked
+        if (!currentUtxo.txid && !originalConfig.__is402CheckMyTab) {
+          // Attempt "check my tab" mode
+          const checkMyTabHeader = await createPaymentHeader(
+            signer,
+            paymentRequirements,
+            x402Version || 2,
+            '*', // txid = "*" for check my tab mode
+            null, // vout = null for check my tab mode
+            resource,
+            extensions
+          )
+
+          originalConfig.__is402CheckMyTab = true
+          originalConfig.__is402Retry = true
+          originalConfig.headers['PAYMENT-SIGNATURE'] = checkMyTabHeader
+          originalConfig.headers['Access-Control-Expose-Headers'] = 'PAYMENT-RESPONSE'
+
+          try {
+            const checkMyTabResponse = await axiosInstance.request(originalConfig)
+            // "Check my tab" succeeded - return response and continue using check my tab mode
+            // Don't update currentUtxo since we're using check my tab mode
+            return checkMyTabResponse
+          } catch (checkMyTabError) {
+            // "Check my tab" failed - check if it's a 402 error
+            if (checkMyTabError.response && checkMyTabError.response.status === 402) {
+              // 402 error from "check my tab" - fall back to UTXO generation
+              // Reset flags and continue with standard flow
+              originalConfig.__is402CheckMyTab = false
+              originalConfig.__is402Retry = false
+              // Continue to UTXO generation logic below
+            } else {
+              // Non-402 error (network error, etc.) - reject it
+              return Promise.reject(checkMyTabError)
+            }
+          }
+        }
+
+        // Standard mode: use existing UTXO or generate new one
         let txid = null
         let vout = null
         let satsLeft = null
