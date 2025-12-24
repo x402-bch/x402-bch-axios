@@ -315,7 +315,12 @@ describe('#index.js', () => {
         .resolves({ txid: 'tx123', vout: 0, satsSent: 2000 })
       __internals.sendPayment = sendPaymentStub
 
-      axiosInstance.request.resolves({ data: 'ok' })
+      // First call (check my tab) returns 402, second call (with UTXO) succeeds
+      axiosInstance.request
+        .onFirstCall()
+        .rejects(create402Error())
+        .onSecondCall()
+        .resolves({ data: 'ok' })
 
       withPaymentInterceptor(axiosInstance, signer)
 
@@ -326,9 +331,10 @@ describe('#index.js', () => {
 
       assert.deepEqual(response, { data: 'ok' })
       assert.isTrue(sendPaymentStub.calledOnce)
-      assert.isTrue(axiosInstance.request.calledOnce)
+      assert.isTrue(axiosInstance.request.calledTwice)
 
-      const updatedConfig = axiosInstance.request.firstCall.args[0]
+      // Check the second call (with UTXO) - first call was check my tab
+      const updatedConfig = axiosInstance.request.secondCall.args[0]
       assert.isTrue(updatedConfig.__is402Retry)
       assert.property(updatedConfig.headers, 'PAYMENT-SIGNATURE')
       assert.propertyVal(
@@ -382,7 +388,22 @@ describe('#index.js', () => {
         .resolves({ txid: 'tx123', vout: 0, satsSent: 2000 })
       __internals.sendPayment = sendPaymentStub
 
-      axiosInstance.request.resolves({ data: 'ok' })
+      // First call (check my tab) returns 402, second call (with UTXO) succeeds
+      axiosInstance.request
+        .onFirstCall()
+        .rejects({
+          response: {
+            status: 402,
+            headers: {},
+            data: {
+              x402Version: 2,
+              accepts: [cloneDeep(basePaymentRequirements)]
+            }
+          },
+          config: { headers: {} }
+        })
+        .onSecondCall()
+        .resolves({ data: 'ok' })
 
       withPaymentInterceptor(axiosInstance, signer)
 
@@ -414,9 +435,10 @@ describe('#index.js', () => {
 
       assert.deepEqual(response, { data: 'ok' })
       assert.isTrue(sendPaymentStub.calledOnce)
-      assert.isTrue(axiosInstance.request.calledOnce)
+      assert.isTrue(axiosInstance.request.calledTwice)
 
-      const updatedConfig = axiosInstance.request.firstCall.args[0]
+      // Check the second call (with UTXO) - first call was check my tab
+      const updatedConfig = axiosInstance.request.secondCall.args[0]
       const headerPayload = JSON.parse(updatedConfig.headers['PAYMENT-SIGNATURE'])
       assert.equal(headerPayload.x402Version, 2)
       assert.deepEqual(headerPayload.resource, baseResource)
@@ -432,7 +454,27 @@ describe('#index.js', () => {
         .resolves({ txid: 'tx123', vout: 0, satsSent: 2000 })
       __internals.sendPayment = sendPaymentStub
 
-      axiosInstance.request.resolves({ data: 'ok' })
+      // First call (check my tab) returns 402, second call (with UTXO) succeeds
+      axiosInstance.request
+        .onFirstCall()
+        .rejects({
+          response: {
+            status: 402,
+            headers: {},
+            data: {
+              x402Version: 1,
+              accepts: [{
+                network: 'bch',
+                scheme: 'utxo',
+                payTo: 'bitcoincash:qprecv',
+                minAmountRequired: 1500
+              }]
+            }
+          },
+          config: { headers: {} }
+        })
+        .onSecondCall()
+        .resolves({ data: 'ok' })
 
       withPaymentInterceptor(axiosInstance, signer)
 
