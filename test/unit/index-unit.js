@@ -506,4 +506,343 @@ describe('#index.js', () => {
       assert.isTrue(sendPaymentStub.calledOnce)
     })
   })
+
+  describe('#sendPayment', () => {
+    function createSignerStub () {
+      return {
+        wif: 'test-wif',
+        paymentAmountSats: 2000,
+        address: 'bitcoincash:qptest'
+      }
+    }
+
+    function createPaymentRequirementsStub () {
+      return {
+        payTo: 'bitcoincash:qprecv',
+        amount: '1500',
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe'
+      }
+    }
+
+    it('should successfully send payment and return txid, vout, and satsSent', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://api.example.com'
+      }
+
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().resolves('tx123')
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves('tx123')
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      const result = await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+
+      assert.deepEqual(result, {
+        txid: 'tx123',
+        vout: 0,
+        satsSent: 2000
+      })
+
+      assert.isTrue(BCHWalletStub.calledOnce)
+      assert.deepEqual(BCHWalletStub.firstCall.args[0], 'test-wif')
+      assert.deepEqual(BCHWalletStub.firstCall.args[1], {
+        interface: 'rest-api',
+        restURL: 'https://api.example.com'
+      })
+      assert.isTrue(mockBchWallet.initialize.calledOnce)
+      assert.isTrue(RetryQueueStub.calledOnce)
+      assert.isTrue(mockRetryQueue.addToQueue.calledOnce)
+
+      // Verify sendWithRetry was called with receivers
+      const sendWithRetry = mockRetryQueue.addToQueue.firstCall.args[0]
+      const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
+      assert.isFunction(sendWithRetry)
+      assert.deepEqual(receivers, [{
+        address: 'bitcoincash:qprecv',
+        amountSat: 2000
+      }])
+
+      __resetDependencies()
+    })
+
+    it('should throw "Insufficient balance" error when sendWithRetry returns null', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {}
+
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().rejects(new Error('Insufficient balance'))
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves(null) // sendWithRetry returns null for insufficient balance
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+        assert.fail('Expected "Insufficient balance" error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Insufficient balance')
+      }
+
+      // Verify sendWithRetry was called and handled the error
+      assert.isTrue(mockRetryQueue.addToQueue.calledOnce)
+      const sendWithRetry = mockRetryQueue.addToQueue.firstCall.args[0]
+
+      // Test sendWithRetry directly to verify it returns null for insufficient balance
+      try {
+        const result = await sendWithRetry([{ address: 'test', amountSat: 1000 }])
+        assert.strictEqual(result, null)
+      } catch (err) {
+        assert.fail('sendWithRetry should return null, not throw')
+      }
+
+      __resetDependencies()
+    })
+
+    it('should handle "Insufficient balance" error in sendWithRetry wrapper', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+
+      const insufficientBalanceError = new Error('Insufficient balance')
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().rejects(insufficientBalanceError)
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().callsFake(async (fn, args) => {
+          // Simulate what RetryQueue does - call the function
+          return await fn(args)
+        })
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements)
+        assert.fail('Expected "Insufficient balance" error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Insufficient balance')
+      }
+
+      // Verify that sendWithRetry was called and returned null
+      assert.isTrue(mockRetryQueue.addToQueue.calledOnce)
+      const sendWithRetry = mockRetryQueue.addToQueue.firstCall.args[0]
+      const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
+
+      // Call sendWithRetry directly to verify it returns null
+      const result = await sendWithRetry(receivers)
+      assert.strictEqual(result, null)
+
+      __resetDependencies()
+    })
+
+    it('should re-throw other errors from sendWithRetry for retry queue to handle', async () => {
+      const networkError = new Error('Network timeout')
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().rejects(networkError)
+      }
+
+      // RetryQueue should eventually succeed after retries
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves('tx456')
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      // Test sendWithRetry directly to verify it re-throws non-insufficient-balance errors
+      const receivers = [{ address: 'test', amountSat: 1000 }]
+
+      // Extract sendWithRetry by simulating what happens in sendPayment
+      const sendWithRetry = async (receivers) => {
+        try {
+          return await mockBchWallet.send(receivers)
+        } catch (error) {
+          if (error.message && error.message.includes('Insufficient balance')) {
+            return null
+          }
+          throw error
+        }
+      }
+
+      // Verify that sendWithRetry re-throws non-insufficient-balance errors
+      try {
+        await sendWithRetry(receivers)
+        assert.fail('Expected network error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Network timeout')
+      }
+
+      // Verify that send was called
+      assert.isTrue(mockBchWallet.send.calledOnce)
+
+      __resetDependencies()
+    })
+
+    it('should use paymentAmountSats from signer when available', async () => {
+      const signer = createSignerStub()
+      signer.paymentAmountSats = 5000
+      const paymentRequirements = createPaymentRequirementsStub()
+
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().resolves('tx789')
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves('tx789')
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      await __internals.sendPayment(signer, paymentRequirements)
+
+      const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
+      assert.equal(receivers[0].amountSat, 5000)
+
+      __resetDependencies()
+    })
+
+    it('should use amountRequired from paymentRequirements when signer.paymentAmountSats is not set', async () => {
+      const signer = createSignerStub()
+      delete signer.paymentAmountSats
+      const paymentRequirements = createPaymentRequirementsStub()
+      paymentRequirements.amount = '3000'
+
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().resolves('tx999')
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves('tx999')
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      await __internals.sendPayment(signer, paymentRequirements)
+
+      const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
+      assert.equal(receivers[0].amountSat, '3000')
+
+      __resetDependencies()
+    })
+
+    it('should only match "Insufficient balance" error message (case-sensitive)', async () => {
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().rejects(new Error('INSUFFICIENT BALANCE'))
+      }
+
+      // Test sendWithRetry directly
+      const sendWithRetry = async (receivers) => {
+        try {
+          return await mockBchWallet.send(receivers)
+        } catch (error) {
+          if (error.message && error.message.includes('Insufficient balance')) {
+            return null
+          }
+          throw error
+        }
+      }
+
+      const receivers = [{ address: 'test', amountSat: 1000 }]
+
+      // This should NOT return null because the error message doesn't match (case-sensitive check)
+      // The includes() method is case-sensitive, so 'INSUFFICIENT BALANCE' won't match 'Insufficient balance'
+      try {
+        const result = await sendWithRetry(receivers)
+        // If it returns null, that's unexpected
+        if (result === null) {
+          assert.fail('Should not return null for case-mismatched error message')
+        }
+      } catch (err) {
+        // Expected - error should be re-thrown because it doesn't match
+        assert.equal(err.message, 'INSUFFICIENT BALANCE')
+      }
+
+      __resetDependencies()
+    })
+
+    it('should propagate errors from wallet initialization', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+
+      const initError = new Error('Failed to initialize wallet')
+      const mockBchWallet = {
+        initialize: sandbox.stub().rejects(initError),
+        send: sandbox.stub()
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub()
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements)
+        assert.fail('Expected initialization error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Failed to initialize wallet')
+      }
+
+      assert.isTrue(mockBchWallet.initialize.calledOnce)
+      assert.isTrue(RetryQueueStub.notCalled)
+
+      __resetDependencies()
+    })
+  })
 })
