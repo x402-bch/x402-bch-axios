@@ -164,16 +164,130 @@ export async function createPaymentHeader (
   return JSON.stringify(paymentHeader)
 }
 
-async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
+// Send the payment using bch.fullstack.cash. In this case, we can use bch-js to execute
+// the payment in a more optimized way.
+// Assumption: A UTXO that is equal to or larger than paymentAmountSats is not a SLP token UTXO.
+async function sendPaymentFullstack (signer, paymentRequirements, bchServerConfig = {}) {
   try {
-    const { apiType, bchServerURL } = bchServerConfig
+    const { apiType, bchServerURL, bearerToken } = bchServerConfig
+
+    // Private key in WIF format.
+    const wif = signer.wif
+    const payToAddr = paymentRequirements.payTo
+
+    // Support both v1 (minAmountRequired) and v2 (amount) field names
+    const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
+    const paymentAmountSats = signer.paymentAmountSats || amountRequired
+
+    // Get bch-js
+    const bchWallet = new dependencies.BCHWallet(signer.wif, {
+      interface: apiType,
+      restURL: bchServerURL,
+      bearerToken
+    })
+    await bchWallet.walletInfoPromise
+    const bchjs = bchWallet.bchjs
+
+    // Generate the bitcoincash: address from the private key.
+    const ecPair = bchjs.ECPair.fromWIF(wif)
+    const payFromAddr = bchjs.ECPair.toCashAddress(ecPair)
+    // console.log(`payFromAddr: ${payFromAddr}`)
+
+    // console.log('bchjs.restURL: ', bchjs.restURL)
+
+    // Get the UTXOs controlled by the private key.
+    let utxos = []
+    let utxoData
+    try {
+      utxoData = await bchjs.Electrumx.utxo(payFromAddr)
+    } catch (err) {
+      throw new Error(`Error retrieving UTXOs for address ${payFromAddr}: ${err.message}`)
+    }
+    if (utxoData.utxos && Array.isArray(utxoData.utxos)) {
+      utxos = utxoData.utxos
+    }
+
+    // Filter out UTXOs that are equal to or greater than the paymentAmountSats
+    utxos = utxos.filter(utxo => utxo.value >= paymentAmountSats)
+    // console.log(`UTXOs available for payment: ${JSON.stringify(utxos, null, 2)}`)
+
+    // Choose the first UTXO that is big enough to pay for the transaction.
+    const utxo = utxos[0]
+
+    // instance of transaction builder
+    const transactionBuilder = new bchjs.TransactionBuilder()
+
+    // Essential variables of a transaction.
+    const satoshisToSend = paymentAmountSats
+    const originalAmount = utxo.value
+    const vout = utxo.tx_pos
+    const txid = utxo.tx_hash
+
+    // add input with txid and index of vout
+    transactionBuilder.addInput(txid, vout)
+
+    // get byte count to calculate fee. paying 1.2 sat/byte
+    const byteCount = bchjs.BitcoinCash.getByteCount({ P2PKH: 1 }, { P2PKH: 2 })
+    // console.log(`Transaction byte count: ${byteCount}`)
+    const satoshisPerByte = 1.2
+    const txFee = Math.floor(satoshisPerByte * byteCount)
+    // console.log(`Transaction fee: ${txFee}`)
+
+    // amount to send back to the sending address.
+    // It's the original amount - 1 sat/byte for tx size
+    const remainder = originalAmount - satoshisToSend - txFee
+
+    if (remainder < 0) {
+      throw new Error('Not enough BCH to complete transaction!')
+    }
+
+    // add output w/ address and amount to send
+    transactionBuilder.addOutput(payToAddr, satoshisToSend)
+    transactionBuilder.addOutput(payFromAddr, remainder)
+
+    // Sign the transaction with the HD node.
+    let redeemScript
+    transactionBuilder.sign(
+      0,
+      ecPair,
+      redeemScript,
+      transactionBuilder.hashTypes.SIGHASH_ALL,
+      originalAmount
+    )
+
+    // build tx
+    const tx = transactionBuilder.build()
+    // output rawhex
+    const hex = tx.toHex()
+    // console.log(`TX hex: ${hex}`);
+    console.log(' ')
+
+    // Broadcast transation to the network
+    const txid2 = await bchjs.RawTransactions.sendRawTransaction([hex])
+    // console.log(`Transaction ID: ${txid2}`)
+
+    return {
+      txid: txid2,
+      vout: 0,
+      satsSent: paymentAmountSats
+    }
+  } catch (err) {
+    console.error('Error in x402-bch-axios/sendPaymentFullstack(): ', err)
+    throw err
+  }
+}
+
+async function sendPaymentGeneric (signer, paymentRequirements, bchServerConfig = {}) {
+  try {
+    const { apiType, bchServerURL, bearerToken } = bchServerConfig
     // Support both v1 (minAmountRequired) and v2 (amount) field names
     const amountRequired = paymentRequirements.amount || paymentRequirements.minAmountRequired
     const paymentAmountSats = signer.paymentAmountSats || amountRequired
 
     const bchWallet = new dependencies.BCHWallet(signer.wif, {
       interface: apiType,
-      restURL: bchServerURL
+      restURL: bchServerURL,
+      bearerToken
     })
     // console.log(`sendPayment() - interface: ${apiType}, restURL: ${bchServerURL}, wif: ${signer.wif}, payTo: ${paymentRequirements.payTo}, paymentAmountSats: ${paymentAmountSats}`)
     console.log(`Sending ${paymentAmountSats} for x402 API payment to ${paymentRequirements.payTo}`)
@@ -216,6 +330,17 @@ async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
   } catch (err) {
     console.error('Error in x402-bch-axios/sendPayment(): ', err.message)
     throw err
+  }
+}
+
+// Route the payment to the appropriate function based on the BCH server URL.
+async function sendPayment (signer, paymentRequirements, bchServerConfig = {}) {
+  const { bchServerURL } = bchServerConfig
+  if (bchServerURL.includes('bch.fullstack.cash')) {
+    // If the BCH server URL is a Fullstack server, use an optimized payment function.
+    return sendPaymentFullstack(signer, paymentRequirements, bchServerConfig)
+  } else {
+    return sendPaymentGeneric(signer, paymentRequirements, bchServerConfig)
   }
 }
 

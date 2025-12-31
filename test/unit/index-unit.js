@@ -525,7 +525,7 @@ describe('#index.js', () => {
       }
     }
 
-    it('should successfully send payment and return txid, vout, and satsSent', async () => {
+    it('should route to sendPaymentGeneric when URL is not fullstack', async () => {
       const signer = createSignerStub()
       const paymentRequirements = createPaymentRequirementsStub()
       const bchServerConfig = {
@@ -562,7 +562,8 @@ describe('#index.js', () => {
       assert.deepEqual(BCHWalletStub.firstCall.args[0], 'test-wif')
       assert.deepEqual(BCHWalletStub.firstCall.args[1], {
         interface: 'rest-api',
-        restURL: 'https://api.example.com'
+        restURL: 'https://api.example.com',
+        bearerToken: undefined
       })
       assert.isTrue(mockBchWallet.initialize.calledOnce)
       assert.isTrue(RetryQueueStub.calledOnce)
@@ -580,10 +581,94 @@ describe('#index.js', () => {
       __resetDependencies()
     })
 
+    it('should route to sendPaymentFullstack when URL contains bch.fullstack.cash', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://bch.fullstack.cash/v5/'
+      }
+
+      const mockEcPair = { ecpair: true }
+      const mockUtxos = [{
+        tx_hash: 'utxo-txid',
+        tx_pos: 1,
+        value: 5000
+      }]
+
+      const mockTransactionBuilder = {
+        addInput: sandbox.stub(),
+        addOutput: sandbox.stub(),
+        sign: sandbox.stub(),
+        build: sandbox.stub().returns({
+          toHex: sandbox.stub().returns('raw-hex')
+        }),
+        hashTypes: {
+          SIGHASH_ALL: 1
+        }
+      }
+
+      const mockBchjs = {
+        ECPair: {
+          fromWIF: sandbox.stub().returns(mockEcPair),
+          toCashAddress: sandbox.stub().returns('bitcoincash:qptest')
+        },
+        Electrumx: {
+          utxo: sandbox.stub().resolves({ utxos: mockUtxos })
+        },
+        TransactionBuilder: sandbox.stub().returns(mockTransactionBuilder),
+        BitcoinCash: {
+          getByteCount: sandbox.stub().returns(250)
+        },
+        RawTransactions: {
+          sendRawTransaction: sandbox.stub().resolves('tx123')
+        }
+      }
+
+      const mockBchWallet = {
+        walletInfoPromise: Promise.resolve(),
+        bchjs: mockBchjs
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub
+      })
+
+      const result = await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+
+      assert.deepEqual(result, {
+        txid: 'tx123',
+        vout: 0,
+        satsSent: 2000
+      })
+
+      assert.isTrue(BCHWalletStub.calledOnce)
+      assert.deepEqual(BCHWalletStub.firstCall.args[0], 'test-wif')
+      assert.deepEqual(BCHWalletStub.firstCall.args[1], {
+        interface: 'rest-api',
+        restURL: 'https://bch.fullstack.cash/v5/',
+        bearerToken: undefined
+      })
+      assert.isTrue(mockBchjs.ECPair.fromWIF.calledOnce)
+      assert.isTrue(mockBchjs.Electrumx.utxo.calledOnce)
+      assert.isTrue(mockBchjs.TransactionBuilder.calledOnce)
+      assert.isTrue(mockTransactionBuilder.addInput.calledOnce)
+      assert.isTrue(mockTransactionBuilder.addOutput.calledTwice)
+      assert.isTrue(mockTransactionBuilder.sign.calledOnce)
+      assert.isTrue(mockBchjs.RawTransactions.sendRawTransaction.calledOnce)
+      assert.deepEqual(mockBchjs.RawTransactions.sendRawTransaction.firstCall.args[0], ['raw-hex'])
+
+      __resetDependencies()
+    })
+
     it('should throw "Insufficient balance" error when sendWithRetry returns null', async () => {
       const signer = createSignerStub()
       const paymentRequirements = createPaymentRequirementsStub()
-      const bchServerConfig = {}
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
 
       const mockBchWallet = {
         initialize: sandbox.stub().resolves(),
@@ -627,6 +712,9 @@ describe('#index.js', () => {
     it('should handle "Insufficient balance" error in sendWithRetry wrapper', async () => {
       const signer = createSignerStub()
       const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
 
       const insufficientBalanceError = new Error('Insufficient balance')
       const mockBchWallet = {
@@ -650,7 +738,7 @@ describe('#index.js', () => {
       })
 
       try {
-        await __internals.sendPayment(signer, paymentRequirements)
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
         assert.fail('Expected "Insufficient balance" error to be thrown')
       } catch (err) {
         assert.equal(err.message, 'Insufficient balance')
@@ -721,6 +809,9 @@ describe('#index.js', () => {
       const signer = createSignerStub()
       signer.paymentAmountSats = 5000
       const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
 
       const mockBchWallet = {
         initialize: sandbox.stub().resolves(),
@@ -739,7 +830,7 @@ describe('#index.js', () => {
         RetryQueue: RetryQueueStub
       })
 
-      await __internals.sendPayment(signer, paymentRequirements)
+      await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
 
       const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
       assert.equal(receivers[0].amountSat, 5000)
@@ -752,6 +843,9 @@ describe('#index.js', () => {
       delete signer.paymentAmountSats
       const paymentRequirements = createPaymentRequirementsStub()
       paymentRequirements.amount = '3000'
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
 
       const mockBchWallet = {
         initialize: sandbox.stub().resolves(),
@@ -770,7 +864,7 @@ describe('#index.js', () => {
         RetryQueue: RetryQueueStub
       })
 
-      await __internals.sendPayment(signer, paymentRequirements)
+      await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
 
       const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
       assert.equal(receivers[0].amountSat, '3000')
@@ -817,6 +911,9 @@ describe('#index.js', () => {
     it('should propagate errors from wallet initialization', async () => {
       const signer = createSignerStub()
       const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
 
       const initError = new Error('Failed to initialize wallet')
       const mockBchWallet = {
@@ -833,7 +930,7 @@ describe('#index.js', () => {
       })
 
       try {
-        await __internals.sendPayment(signer, paymentRequirements)
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
         assert.fail('Expected initialization error to be thrown')
       } catch (err) {
         assert.equal(err.message, 'Failed to initialize wallet')
@@ -841,6 +938,253 @@ describe('#index.js', () => {
 
       assert.isTrue(mockBchWallet.initialize.calledOnce)
       assert.isTrue(RetryQueueStub.notCalled)
+
+      __resetDependencies()
+    })
+
+    it('should support v1 minAmountRequired field in sendPaymentGeneric', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      delete paymentRequirements.amount
+      paymentRequirements.minAmountRequired = 2500
+      const bchServerConfig = {
+        bchServerURL: 'https://api.example.com'
+      }
+
+      const mockBchWallet = {
+        initialize: sandbox.stub().resolves(),
+        send: sandbox.stub().resolves('tx-v1')
+      }
+
+      const mockRetryQueue = {
+        addToQueue: sandbox.stub().resolves('tx-v1')
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+      const RetryQueueStub = sandbox.stub().returns(mockRetryQueue)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub,
+        RetryQueue: RetryQueueStub
+      })
+
+      await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+
+      const receivers = mockRetryQueue.addToQueue.firstCall.args[1]
+      // Should use paymentAmountSats from signer (2000) when available, not minAmountRequired
+      assert.equal(receivers[0].amountSat, 2000)
+
+      __resetDependencies()
+    })
+
+    it('should handle UTXO retrieval errors in sendPaymentFullstack', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://bch.fullstack.cash/v5/'
+      }
+
+      const mockEcPair = { ecpair: true }
+      const mockBchjs = {
+        ECPair: {
+          fromWIF: sandbox.stub().returns(mockEcPair),
+          toCashAddress: sandbox.stub().returns('bitcoincash:qptest')
+        },
+        Electrumx: {
+          utxo: sandbox.stub().rejects(new Error('Network error'))
+        }
+      }
+
+      const mockBchWallet = {
+        walletInfoPromise: Promise.resolve(),
+        bchjs: mockBchjs
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+        assert.fail('Expected error to be thrown')
+      } catch (err) {
+        assert.match(err.message, /Error retrieving UTXOs/)
+        assert.match(err.message, /Network error/)
+      }
+
+      __resetDependencies()
+    })
+
+    it('should throw error when insufficient balance in sendPaymentFullstack', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://bch.fullstack.cash/v5/'
+      }
+
+      const mockEcPair = { ecpair: true }
+      const mockUtxos = [{
+        tx_hash: 'utxo-txid',
+        tx_pos: 1,
+        value: 1000 // Less than paymentAmountSats (2000)
+      }]
+
+      const mockBchjs = {
+        ECPair: {
+          fromWIF: sandbox.stub().returns(mockEcPair),
+          toCashAddress: sandbox.stub().returns('bitcoincash:qptest')
+        },
+        Electrumx: {
+          utxo: sandbox.stub().resolves({ utxos: mockUtxos })
+        }
+      }
+
+      const mockBchWallet = {
+        walletInfoPromise: Promise.resolve(),
+        bchjs: mockBchjs
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+        assert.fail('Expected error to be thrown')
+      } catch (err) {
+        // Should fail because utxos[0] is undefined after filtering
+        assert.isDefined(err)
+      }
+
+      __resetDependencies()
+    })
+
+    it('should handle transaction building errors in sendPaymentFullstack', async () => {
+      const signer = createSignerStub()
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://bch.fullstack.cash/v5/'
+      }
+
+      const mockEcPair = { ecpair: true }
+      const mockUtxos = [{
+        tx_hash: 'utxo-txid',
+        tx_pos: 1,
+        value: 5000
+      }]
+
+      const mockTransactionBuilder = {
+        addInput: sandbox.stub(),
+        addOutput: sandbox.stub(),
+        sign: sandbox.stub(),
+        build: sandbox.stub().throws(new Error('Build failed')),
+        hashTypes: {
+          SIGHASH_ALL: 1
+        }
+      }
+
+      const mockBchjs = {
+        ECPair: {
+          fromWIF: sandbox.stub().returns(mockEcPair),
+          toCashAddress: sandbox.stub().returns('bitcoincash:qptest')
+        },
+        Electrumx: {
+          utxo: sandbox.stub().resolves({ utxos: mockUtxos })
+        },
+        TransactionBuilder: sandbox.stub().returns(mockTransactionBuilder),
+        BitcoinCash: {
+          getByteCount: sandbox.stub().returns(250)
+        }
+      }
+
+      const mockBchWallet = {
+        walletInfoPromise: Promise.resolve(),
+        bchjs: mockBchjs
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+        assert.fail('Expected error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Build failed')
+      }
+
+      __resetDependencies()
+    })
+
+    it('should throw error when remainder is negative in sendPaymentFullstack', async () => {
+      const signer = createSignerStub()
+      signer.paymentAmountSats = 10000 // Large amount
+      const paymentRequirements = createPaymentRequirementsStub()
+      const bchServerConfig = {
+        apiType: 'rest-api',
+        bchServerURL: 'https://bch.fullstack.cash/v5/'
+      }
+
+      const mockEcPair = { ecpair: true }
+      // UTXO value must be >= paymentAmountSats (10000) to pass filter
+      // But remainder = value - paymentAmountSats - txFee must be negative
+      // With txFee = 1.2 * 250 = 300, we need value < 10300
+      // So use value = 10200: remainder = 10200 - 10000 - 300 = -100 < 0
+      const mockUtxos = [{
+        tx_hash: 'utxo-txid',
+        tx_pos: 1,
+        value: 10200 // >= paymentAmountSats but insufficient after fee
+      }]
+
+      const mockTransactionBuilder = {
+        addInput: sandbox.stub(),
+        addOutput: sandbox.stub(),
+        sign: sandbox.stub(),
+        hashTypes: {
+          SIGHASH_ALL: 1
+        }
+      }
+
+      const mockBchjs = {
+        ECPair: {
+          fromWIF: sandbox.stub().returns(mockEcPair),
+          toCashAddress: sandbox.stub().returns('bitcoincash:qptest')
+        },
+        Electrumx: {
+          utxo: sandbox.stub().resolves({ utxos: mockUtxos })
+        },
+        TransactionBuilder: sandbox.stub().returns(mockTransactionBuilder),
+        BitcoinCash: {
+          getByteCount: sandbox.stub().returns(250)
+        }
+      }
+
+      const mockBchWallet = {
+        walletInfoPromise: Promise.resolve(),
+        bchjs: mockBchjs
+      }
+
+      const BCHWalletStub = sandbox.stub().returns(mockBchWallet)
+
+      __setDependencies({
+        BCHWallet: BCHWalletStub
+      })
+
+      try {
+        await __internals.sendPayment(signer, paymentRequirements, bchServerConfig)
+        assert.fail('Expected error to be thrown')
+      } catch (err) {
+        assert.equal(err.message, 'Not enough BCH to complete transaction!')
+      }
 
       __resetDependencies()
     })
