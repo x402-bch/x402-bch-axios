@@ -658,7 +658,7 @@ describe('#index.js', () => {
       assert.isTrue(mockTransactionBuilder.addOutput.calledTwice)
       assert.isTrue(mockTransactionBuilder.sign.calledOnce)
       assert.isTrue(mockBchjs.RawTransactions.sendRawTransaction.calledOnce)
-      assert.deepEqual(mockBchjs.RawTransactions.sendRawTransaction.firstCall.args[0], ['raw-hex'])
+      assert.deepEqual(mockBchjs.RawTransactions.sendRawTransaction.firstCall.args[0], 'raw-hex')
 
       __resetDependencies()
     })
