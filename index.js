@@ -211,6 +211,10 @@ async function sendPaymentFullstack (signer, paymentRequirements, bchServerConfi
     utxos = utxos.filter(utxo => utxo.value >= paymentAmountSats)
     // console.log(`UTXOs available for payment: ${JSON.stringify(utxos, null, 2)}`)
 
+    if (utxos.length === 0) {
+      throw new Error('Not enough funds. Send more BCH to your wallet address.')
+    }
+
     // Choose the first UTXO that is big enough to pay for the transaction.
     const utxo = utxos[0]
 
@@ -263,8 +267,9 @@ async function sendPaymentFullstack (signer, paymentRequirements, bchServerConfi
     console.log(' ')
 
     // Broadcast transation to the network
-    const txid2 = await bchjs.RawTransactions.sendRawTransaction([hex])
-    // console.log(`Transaction ID: ${txid2}`)
+    const txid2 = await bchjs.RawTransactions.sendRawTransaction(hex)
+    // txid2 = txid2[0]
+    // console.log(`1) Transaction ID: `, txid2)
 
     return {
       txid: txid2,
@@ -272,7 +277,7 @@ async function sendPaymentFullstack (signer, paymentRequirements, bchServerConfi
       satsSent: paymentAmountSats
     }
   } catch (err) {
-    console.error('Error in x402-bch-axios/sendPaymentFullstack(): ', err)
+    console.error('Error in x402-bch-axios/sendPaymentFullstack(): ', err.message)
     throw err
   }
 }
@@ -317,6 +322,7 @@ async function sendPaymentGeneric (signer, paymentRequirements, bchServerConfig 
     }
 
     const txid = await retryQueue.addToQueue(sendWithRetry, receivers)
+    // console.log(`2) Transaction ID: ${txid}`)
 
     if (txid === null) {
       throw new Error('Insufficient balance')
